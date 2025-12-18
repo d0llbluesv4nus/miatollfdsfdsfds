@@ -96,7 +96,7 @@ jobs:
             exit 1
           fi
           
-          # Setup Swap (12GB) - Critical for Java and Image Operations
+          # Setup Swap (12GB) - Critical for stability
           sudo swapoff -a
           sudo rm -f /swapfile
           sudo fallocate -l 12G /swapfile
@@ -217,7 +217,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Deep Recursive Copy)
+      - name: 5. Prepare Images (Batch Copy)
         working-directory: ./build
         run: |
           set -e
@@ -225,36 +225,6 @@ jobs:
           
           mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
           mkdir -p temp_mount_src
-          
-          # Define safe recursive copy function
-          copy_safely() {
-            local SRC_DIR=$1
-            local DEST_DIR=$2
-            
-            # Create destination
-            sudo mkdir -p "$DEST_DIR"
-            
-            # Iterate through contents
-            for ITEM in "$SRC_DIR"/*; do
-               [ -e "$ITEM" ] || continue
-               local NAME=$(basename "$ITEM")
-               
-               # List of heavy directories that need descent
-               if [ -d "$ITEM" ]; then
-                 if [[ "$NAME" == "system" || "$NAME" == "system_ext" || "$NAME" == "product" || "$NAME" == "vendor" || "$NAME" == "app" || "$NAME" == "priv-app" || "$NAME" == "lib" || "$NAME" == "lib64" || "$NAME" == "framework" ]]; then
-                    # Recursion for big folders
-                    echo "--> Descending into $NAME..."
-                    copy_safely "$ITEM" "$DEST_DIR/$NAME"
-                    continue
-                 fi
-               fi
-               
-               # Standard copy for files or small folders
-               sudo cp -a "$ITEM" "$DEST_DIR/"
-               # Force sync to free pagecache (Crucial for OOM prevention)
-               sudo sync
-            done
-          }
           
           process_partition() {
             PART=$1
@@ -271,7 +241,7 @@ jobs:
                  
                  # 1. Create Target EXT4 Image
                  ORIG_SIZE=$(stat -c%s "$IMG")
-                 NEW_SIZE=$(($ORIG_SIZE + 1073741824)) # +1GB
+                 NEW_SIZE=$(($ORIG_SIZE + 1073741824)) # +1GB buffer
                  dd if=/dev/zero of="${PART}_ext4.img" bs=1 count=0 seek=$NEW_SIZE
                  mkfs.ext4 -F "${PART}_ext4.img"
                  
@@ -281,9 +251,23 @@ jobs:
                  # 3. Mount Target (EXT4)
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. Deep Copy
-                 echo "Starting Deep Copy..."
-                 copy_safely "temp_mount_src" "$MNT"
+                 # 4. ROBUST BATCH COPY (Fixes OOM 137)
+                 echo "Starting Copy..."
+                 cd temp_mount_src
+                 
+                 # A. Replicate Directory Structure (Low Memory)
+                 echo "--> Replicating directories..."
+                 find . -type d -exec sudo mkdir -p "../$MNT/{}" \;
+                 
+                 # B. Copy Files in Batches of 50
+                 echo "--> Copying files in batches..."
+                 # We use find to pipe filenames to xargs. 
+                 # -print0 / -0 handles spaces in filenames safely.
+                 # -n 50 runs cp for 50 files at a time.
+                 # We sync after every batch to flush RAM.
+                 find . -type f -o -type l -print0 | xargs -0 -n 50 sh -c 'sudo cp -aP --parents "$@" "../'"$MNT"'/" && sync' _
+                 
+                 cd ..
                  
                  # 5. Cleanup
                  sudo umount temp_mount_src
@@ -293,7 +277,7 @@ jobs:
                  rm "$IMG"
                  mv "${PART}_ext4.img" "$IMG"
                  
-                 # 7. Remount
+                 # 7. Remount for editing
                  sudo mount -o loop,rw "$IMG" "$MNT"
                  
               else

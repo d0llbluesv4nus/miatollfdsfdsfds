@@ -217,7 +217,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Chunked Copy to prevent OOM)
+      - name: 5. Prepare Images (Deep Recursive Copy)
         working-directory: ./build
         run: |
           set -e
@@ -226,6 +226,36 @@ jobs:
           mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
           mkdir -p temp_mount_src
           
+          # Define safe recursive copy function
+          copy_safely() {
+            local SRC_DIR=$1
+            local DEST_DIR=$2
+            
+            # Create destination
+            sudo mkdir -p "$DEST_DIR"
+            
+            # Iterate through contents
+            for ITEM in "$SRC_DIR"/*; do
+               [ -e "$ITEM" ] || continue
+               local NAME=$(basename "$ITEM")
+               
+               # List of heavy directories that need descent
+               if [ -d "$ITEM" ]; then
+                 if [[ "$NAME" == "system" || "$NAME" == "system_ext" || "$NAME" == "product" || "$NAME" == "vendor" || "$NAME" == "app" || "$NAME" == "priv-app" || "$NAME" == "lib" || "$NAME" == "lib64" || "$NAME" == "framework" ]]; then
+                    # Recursion for big folders
+                    echo "--> Descending into $NAME..."
+                    copy_safely "$ITEM" "$DEST_DIR/$NAME"
+                    continue
+                 fi
+               fi
+               
+               # Standard copy for files or small folders
+               sudo cp -a "$ITEM" "$DEST_DIR/"
+               # Force sync to free pagecache (Crucial for OOM prevention)
+               sudo sync
+            done
+          }
+          
           process_partition() {
             PART=$1
             IMG="input/raw_images/$PART.img"
@@ -233,53 +263,40 @@ jobs:
             
             if [ -f "$IMG" ]; then
               echo "Processing $PART..."
-              
-              # Check filesystem type
               FS_TYPE=$(file -bL "$IMG" | awk '{print $1}')
               echo "Filesystem: $FS_TYPE"
               
               if [[ "$FS_TYPE" == "EROFS" ]] || [[ "$FS_TYPE" == "Linux" ]]; then
                  echo "EROFS detected. Converting to EXT4..."
                  
-                 # 1. Create Target EXT4 Image (Size + 800MB buffer)
+                 # 1. Create Target EXT4 Image
                  ORIG_SIZE=$(stat -c%s "$IMG")
-                 NEW_SIZE=$(($ORIG_SIZE + 838860800))
+                 NEW_SIZE=$(($ORIG_SIZE + 1073741824)) # +1GB
                  dd if=/dev/zero of="${PART}_ext4.img" bs=1 count=0 seek=$NEW_SIZE
-                 mkfs.ext4 "${PART}_ext4.img"
+                 mkfs.ext4 -F "${PART}_ext4.img"
                  
-                 # 2. Mount Source (EROFS) - RO
+                 # 2. Mount Source (EROFS)
                  sudo mount -o loop,ro "$IMG" temp_mount_src
                  
-                 # 3. Mount Target (EXT4) - RW
+                 # 3. Mount Target (EXT4)
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. CHUNKED COPY (To avoid OOM 137)
-                 echo "Copying files using chunked strategy..."
-                 cd temp_mount_src
-                 # Iterate over top-level items
-                 for ITEM in *; do
-                   if [ -e "$ITEM" ]; then
-                     echo "--> Copying $ITEM..."
-                     sudo cp -a "$ITEM" "../$MNT/"
-                     # Critical: Sync to flush RAM buffers to disk
-                     sync
-                   fi
-                 done
-                 cd ..
+                 # 4. Deep Copy
+                 echo "Starting Deep Copy..."
+                 copy_safely "temp_mount_src" "$MNT"
                  
                  # 5. Cleanup
                  sudo umount temp_mount_src
                  sudo umount "$MNT"
                  
-                 # 6. Replace original with EXT4
+                 # 6. Swap images
                  rm "$IMG"
                  mv "${PART}_ext4.img" "$IMG"
                  
-                 # 7. Remount for editing
+                 # 7. Remount
                  sudo mount -o loop,rw "$IMG" "$MNT"
                  
               else
-                 # Assume EXT4
                  echo "EXT4 detected. Resizing..."
                  dd if=/dev/zero bs=1M count=512 >> "$IMG"
                  e2fsck -f -y "$IMG" || true
@@ -296,7 +313,7 @@ jobs:
           
           rm -rf temp_mount_src
           
-          echo "Images mounted RW and ready for porting."
+          echo "Images mounted RW."
           echo "::endgroup::"
 
       - name: 6. Debloat System

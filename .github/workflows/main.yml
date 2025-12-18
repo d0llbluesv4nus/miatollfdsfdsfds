@@ -217,7 +217,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Batch Copy with Sudo)
+      - name: 5. Prepare Images (Fixed Batch Copy)
         working-directory: ./build
         run: |
           set -e
@@ -251,19 +251,20 @@ jobs:
                  # 3. Mount Target (EXT4)
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. ROBUST BATCH COPY (Sudo Fix)
+                 # 4. ROBUST BATCH COPY
+                 # Fix: Use 'cp -t DEST' to handle arguments safely
+                 # Fix: Use 'xargs -r' to avoid running cp with empty file list
                  echo "Starting Copy..."
                  cd temp_mount_src
                  
                  # A. Replicate Directory Structure
-                 # Use sudo find to avoid Permission Denied on root folders
                  echo "--> Replicating directories..."
-                 sudo find . -type d -print0 | xargs -0 -I {} sudo mkdir -p "../$MNT/{}"
+                 sudo find . -type d -print0 | xargs -0 -r -I {} sudo mkdir -p "../$MNT/{}"
                  
                  # B. Copy Files in Batches
-                 # Use sudo find for discovery, pipe to xargs running sudo cp
                  echo "--> Copying files in batches..."
-                 sudo find . -type f -o -type l -print0 | xargs -0 -n 50 sh -c 'sudo cp -aP --parents "$@" "../'"$MNT"'/" && sync' _
+                 # Using -t "../$MNT/" puts destination first, avoiding 'missing operand' errors
+                 sudo find . -type f -o -type l -print0 | xargs -0 -r -n 50 sh -c 'sudo cp -aP --parents -t "../'"$MNT"'" "$@" && sync' _
                  
                  cd ..
                  

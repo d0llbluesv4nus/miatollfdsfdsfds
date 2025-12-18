@@ -217,7 +217,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Batch Copy)
+      - name: 5. Prepare Images (Batch Copy with Sudo)
         working-directory: ./build
         run: |
           set -e
@@ -251,21 +251,19 @@ jobs:
                  # 3. Mount Target (EXT4)
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. ROBUST BATCH COPY (Fixes OOM 137)
+                 # 4. ROBUST BATCH COPY (Sudo Fix)
                  echo "Starting Copy..."
                  cd temp_mount_src
                  
-                 # A. Replicate Directory Structure (Low Memory)
+                 # A. Replicate Directory Structure
+                 # Use sudo find to avoid Permission Denied on root folders
                  echo "--> Replicating directories..."
-                 find . -type d -exec sudo mkdir -p "../$MNT/{}" \;
+                 sudo find . -type d -print0 | xargs -0 -I {} sudo mkdir -p "../$MNT/{}"
                  
-                 # B. Copy Files in Batches of 50
+                 # B. Copy Files in Batches
+                 # Use sudo find for discovery, pipe to xargs running sudo cp
                  echo "--> Copying files in batches..."
-                 # We use find to pipe filenames to xargs. 
-                 # -print0 / -0 handles spaces in filenames safely.
-                 # -n 50 runs cp for 50 files at a time.
-                 # We sync after every batch to flush RAM.
-                 find . -type f -o -type l -print0 | xargs -0 -n 50 sh -c 'sudo cp -aP --parents "$@" "../'"$MNT"'/" && sync' _
+                 sudo find . -type f -o -type l -print0 | xargs -0 -n 50 sh -c 'sudo cp -aP --parents "$@" "../'"$MNT"'/" && sync' _
                  
                  cd ..
                  

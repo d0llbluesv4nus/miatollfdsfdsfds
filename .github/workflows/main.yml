@@ -96,7 +96,7 @@ jobs:
             exit 1
           fi
           
-          # Setup Swap (12GB) - Still needed for Java/Smali
+          # Setup Swap (12GB) - Critical for Java and Image Operations
           sudo swapoff -a
           sudo rm -f /swapfile
           sudo fallocate -l 12G /swapfile
@@ -111,11 +111,12 @@ jobs:
           echo "::group::Installing Packages"
           sudo apt-get update
           
-          # Install deps including zlib for compiling simg2img
+          # Install deps including zlib for compiling simg2img and erofs-utils
           sudo apt-get install -y \
             git wget curl python3 python3-pip zip unzip tar 7zip \
-            brotli lz4 openjdk-17-jdk \
-            liblz4-tool e2fsprogs device-tree-compiler build-essential zlib1g-dev
+            brotli lz4 openjdk-17-jdk rsync \
+            liblz4-tool e2fsprogs device-tree-compiler build-essential zlib1g-dev \
+            erofs-utils
           
           # Install Python protobuf
           pip3 install --upgrade pip protobuf
@@ -216,17 +217,16 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Resize & Mount RW)
+      - name: 5. Prepare Images (Convert EROFS -> EXT4 & Mount)
         working-directory: ./build
         run: |
           set -e
-          echo "::group::Preparing In-Place Editing"
-          # STRATEGY: Instead of copying (cp -a) which causes OOM 137,
-          # we expand the raw images and mount them Read/Write.
+          echo "::group::Preparing Images"
           
           mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
+          mkdir -p temp_mount_src
           
-          prepare_partition() {
+          process_partition() {
             PART=$1
             IMG="input/raw_images/$PART.img"
             MNT="port_rom/$PART"
@@ -234,26 +234,64 @@ jobs:
             if [ -f "$IMG" ]; then
               echo "Processing $PART..."
               
-              # 1. Expand image size by 512MB to allow adding files/patching
-              dd if=/dev/zero bs=1M count=512 >> "$IMG"
+              # Check filesystem type
+              FS_TYPE=$(file -bL "$IMG" | awk '{print $1}')
+              echo "Filesystem: $FS_TYPE"
               
-              # 2. Check and Resize filesystem
-              echo "Resizing FS..."
-              e2fsck -f -y "$IMG" || true # Force check, ignore non-critical
-              resize2fs "$IMG"
-              
-              # 3. Mount RW
-              echo "Mounting RW to $MNT..."
-              sudo mount -o loop,rw "$IMG" "$MNT"
+              if [[ "$FS_TYPE" == "EROFS" ]] || [[ "$FS_TYPE" == "Linux" ]]; then
+                 # Check specifically for EROFS using fsck.erofs if file command was vague "Linux" (sometimes happens)
+                 # But usually 'EROFS' is detected.
+                 echo "EROFS detected. Converting to EXT4..."
+                 
+                 # 1. Create Target EXT4 Image (Size + 800MB buffer)
+                 ORIG_SIZE=$(stat -c%s "$IMG")
+                 NEW_SIZE=$(($ORIG_SIZE + 838860800))
+                 dd if=/dev/zero of="${PART}_ext4.img" bs=1 count=0 seek=$NEW_SIZE
+                 mkfs.ext4 "${PART}_ext4.img"
+                 
+                 # 2. Mount Source (EROFS) - RO
+                 sudo mount -o loop,ro "$IMG" temp_mount_src
+                 
+                 # 3. Mount Target (EXT4) - RW
+                 sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
+                 
+                 # 4. Copy Content (Using rsync for better memory management)
+                 echo "Copying files..."
+                 sudo rsync -aAX --info=progress2 temp_mount_src/ "$MNT/"
+                 
+                 # 5. Cleanup
+                 sudo umount temp_mount_src
+                 sudo umount "$MNT" # Unmount to finalize writes
+                 
+                 # 6. Replace original with EXT4
+                 rm "$IMG"
+                 mv "${PART}_ext4.img" "$IMG"
+                 
+                 # 7. Remount for editing
+                 sudo mount -o loop,rw "$IMG" "$MNT"
+                 
+              else
+                 # Assume EXT4
+                 echo "EXT4 detected. Resizing..."
+                 # Expand
+                 dd if=/dev/zero bs=1M count=512 >> "$IMG"
+                 e2fsck -f -y "$IMG" || true
+                 resize2fs "$IMG"
+                 
+                 # Mount RW
+                 sudo mount -o loop,rw "$IMG" "$MNT"
+              fi
             fi
           }
           
-          prepare_partition system
-          prepare_partition system_ext
-          prepare_partition product
-          prepare_partition vendor
+          process_partition system
+          process_partition system_ext
+          process_partition product
+          process_partition vendor
           
-          echo "Images mounted RW. Ready for direct editing."
+          rm -rf temp_mount_src
+          
+          echo "Images mounted RW and ready for porting."
           echo "::endgroup::"
 
       - name: 6. Debloat System
@@ -261,7 +299,7 @@ jobs:
         run: |
           set -e
           echo "::group::Debloating"
-          # Operations happen directly on the mounted image now
+          # Operations happen directly on the mounted image
           APPS_TO_REMOVE="
           system/app/AnalyticsCore
           system/app/FacebookAppManager

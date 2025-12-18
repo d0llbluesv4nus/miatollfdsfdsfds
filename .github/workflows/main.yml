@@ -71,8 +71,7 @@ jobs:
           echo "::group::Cleaning Disk Space"
           df -h
           
-          # Remove massive pre-installed packages to free up maximum space
-          # /opt/hostedtoolcache is usually 15GB+
+          # Remove massive pre-installed packages
           sudo rm -rf /opt/hostedtoolcache
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
@@ -80,7 +79,6 @@ jobs:
           sudo rm -rf /usr/local/share/powershell
           sudo rm -rf /usr/share/swift
           sudo rm -rf /usr/local/lib/node_modules
-          sudo rm -rf /usr/local/share/boost
           sudo rm -rf /usr/lib/google-cloud-sdk
           sudo rm -rf /usr/lib/jvm
           
@@ -90,7 +88,7 @@ jobs:
           sudo apt-get autoremove -y
           sudo rm -rf /var/lib/apt/lists/*
           
-          # Check space (Modified threshold to 30GB which is safe for Miatoll)
+          # Check space (Threshold 30GB)
           AVAILABLE=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
           echo "Free Space: ${AVAILABLE}GB"
           if [ "$AVAILABLE" -lt 30 ]; then
@@ -98,7 +96,7 @@ jobs:
             exit 1
           fi
           
-          # Setup Swap (12GB) to prevent OOM during repacking
+          # Setup Swap (12GB)
           sudo swapoff -a
           sudo rm -f /swapfile
           sudo fallocate -l 12G /swapfile
@@ -112,11 +110,12 @@ jobs:
           set -e
           echo "::group::Installing Packages"
           sudo apt-get update
+          
+          # Removed failing packages (simg2img, img2simg, etc) from apt
           sudo apt-get install -y \
             git wget curl python3 python3-pip zip unzip tar 7zip \
-            brotli lz4 simg2img img2simg openjdk-17-jdk \
-            liblz4-tool android-sdk-lib-sparse-utils e2fsprogs \
-            device-tree-compiler
+            brotli lz4 openjdk-17-jdk \
+            liblz4-tool e2fsprogs device-tree-compiler
           
           # Install Python protobuf
           pip3 install --upgrade pip protobuf
@@ -127,14 +126,24 @@ jobs:
           chmod a+x ~/bin/repo
           export PATH=~/bin:$PATH
           
-          # Download portable tools
+          # MANUAL INSTALL OF BINARIES (Fixes 'package not found' error)
+          echo "Downloading Android Image Tools manually..."
+          
+          # Payload Dumper
           mkdir -p tools
           cd tools
-          
-          # Payload Dumper Go
           wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
           tar -zxf payload-dumper-go_1.2.2_linux_amd64.tar.gz
           mv payload-dumper-go_1.2.2_linux_amd64/payload-dumper-go .
+          
+          # simg2img / img2simg (From ErfanGSI Tools - Trusted Source)
+          wget -q https://raw.githubusercontent.com/erfanoabdi/android_tools/master/linux/bin/simg2img -O simg2img
+          wget -q https://raw.githubusercontent.com/erfanoabdi/android_tools/master/linux/bin/img2simg -O img2simg
+          chmod +x simg2img img2simg
+          
+          # Move binaries to path
+          sudo cp simg2img /usr/local/bin/
+          sudo cp img2simg /usr/local/bin/
           
           # Apktool
           wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.1.jar -O apktool.jar
@@ -142,7 +151,7 @@ jobs:
           echo 'java -jar $(dirname $0)/apktool.jar "$@"' >> apktool
           chmod +x apktool
           
-          # Smali/Baksmali
+          # Baksmali/Smali
           wget -q https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar -O baksmali.jar
           wget -q https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar -O smali.jar
           echo "::endgroup::"
@@ -170,10 +179,7 @@ jobs:
             echo "Format: Super.img"
             unzip firmware.zip super.img
             simg2img super.img super.raw
-            # Note: lpunpack is required for super.img splitting. 
-            # If not present in env, this path might need custom tool download.
-            # Assuming payload-dumper-go handles most modern ROMs.
-            echo "::warning::Super.img extraction assumes flat image or lpunpack availability."
+            echo "::warning::Super.img extraction assumes flat image."
           else
             echo "Format: Standard Images"
             unzip firmware.zip "*.img" -d raw_images

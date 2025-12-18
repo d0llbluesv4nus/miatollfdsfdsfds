@@ -96,7 +96,7 @@ jobs:
             exit 1
           fi
           
-          # Setup Swap (12GB) - Critical
+          # Setup Swap (12GB) - Critical for stability
           sudo swapoff -a
           sudo rm -f /swapfile
           sudo fallocate -l 12G /swapfile
@@ -116,7 +116,7 @@ jobs:
             git wget curl python3 python3-pip zip unzip tar 7zip \
             brotli lz4 openjdk-17-jdk \
             liblz4-tool e2fsprogs device-tree-compiler build-essential zlib1g-dev \
-            erofs-utils rsync
+            erofs-utils
           
           # Install Python protobuf
           pip3 install --upgrade pip protobuf
@@ -137,6 +137,7 @@ jobs:
           echo "Installing Payload Dumper..."
           wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
           tar -zxf payload-dumper-go_1.2.2_linux_amd64.tar.gz
+          # Robust find to locate binary
           find . -type f -name "payload-dumper-go" -exec chmod +x {} \;
           find . -type f -name "payload-dumper-go" -exec mv {} . \; || true
           
@@ -179,6 +180,7 @@ jobs:
           if grep -q "payload.bin" content.txt; then
             echo "Format: Payload.bin"
             unzip firmware.zip payload.bin
+            # Call payload-dumper-go
             PD_TOOL="../../tools/payload-dumper-go"
             if [ ! -f "$PD_TOOL" ]; then
               PD_TOOL=$(find ../../tools -name payload-dumper-go -type f | head -n 1)
@@ -215,7 +217,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Simple Rsync Loop)
+      - name: 5. Prepare Images (Granular Recursive Copy)
         working-directory: ./build
         run: |
           set -e
@@ -223,6 +225,35 @@ jobs:
           
           mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
           mkdir -p temp_mount_src
+          
+          # Function to copy safely without OOM
+          granular_copy() {
+            SRC_DIR=$1
+            DEST_DIR=$2
+            
+            # Create destination folder
+            sudo mkdir -p "$DEST_DIR"
+            
+            # Iterate through contents
+            for ITEM in "$SRC_DIR"/*; do
+              [ -e "$ITEM" ] || continue
+              BASENAME=$(basename "$ITEM")
+              
+              # Identify folders that contain thousands of files and need recursion
+              # This prevents rsync/cp from building a massive file list in RAM
+              if [ -d "$ITEM" ] && [[ "$BASENAME" =~ ^(system|product|vendor|app|priv-app|framework|lib|lib64|bin|etc)$ ]]; then
+                  echo "--> Deep diving into $BASENAME..."
+                  granular_copy "$ITEM" "$DEST_DIR/$BASENAME"
+              else
+                  # For individual files or small folders, copy directly
+                  # Using cp -a is safer than rsync here to avoid generator overhead
+                  sudo cp -a "$ITEM" "$DEST_DIR/"
+                  
+                  # CRITICAL: Flush RAM buffers to disk immediately
+                  sudo sync
+              fi
+            done
+          }
           
           process_partition() {
             PART=$1
@@ -237,7 +268,7 @@ jobs:
               if [[ "$FS_TYPE" == "EROFS" ]] || [[ "$FS_TYPE" == "Linux" ]]; then
                  echo "EROFS detected. Converting to EXT4..."
                  
-                 # 1. Create Target EXT4 Image (+1.5GB buffer for edits)
+                 # 1. Create Target EXT4 Image (+1.5GB buffer)
                  ORIG_SIZE=$(stat -c%s "$IMG")
                  NEW_SIZE=$(($ORIG_SIZE + 1610612736))
                  dd if=/dev/zero of="${PART}_ext4.img" bs=1 count=0 seek=$NEW_SIZE
@@ -249,39 +280,19 @@ jobs:
                  # 3. Mount Target (EXT4)
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. SAFE COPY LOOP (No OOM, Permissions Handled)
-                 echo "Starting Safe Copy..."
-                 cd temp_mount_src
+                 # 4. GRANULAR COPY (No OOM)
+                 echo "Starting Granular Copy..."
+                 granular_copy "temp_mount_src" "$MNT"
                  
-                 # Loop through top-level items to avoid reading full tree into RAM
-                 for ITEM in *; do
-                   if [ -e "$ITEM" ]; then
-                     echo "--> Copying $ITEM..."
-                     # Use rsync for reliability. 
-                     # -a: archive (perms, symlinks)
-                     # --info=progress2: show progress
-                     # --no-inc-recursive: save RAM on huge file lists
-                     sudo rsync -a --no-inc-recursive "$ITEM" "../$MNT/"
-                     
-                     # Force flush RAM to disk
-                     sudo sync
-                   fi
-                 done
-                 cd ..
-                 
-                 # 5. Verify Content
-                 SIZE_CHECK=$(sudo du -sh "$MNT" | cut -f1)
-                 echo "Copied size: $SIZE_CHECK"
-                 
-                 # 6. Cleanup
+                 # 5. Cleanup
                  sudo umount temp_mount_src
                  sudo umount "$MNT"
                  
-                 # 7. Swap
+                 # 6. Swap
                  rm "$IMG"
                  mv "${PART}_ext4.img" "$IMG"
                  
-                 # 8. Remount
+                 # 7. Remount
                  sudo mount -o loop,rw "$IMG" "$MNT"
                  
               else
@@ -292,11 +303,11 @@ jobs:
                  sudo mount -o loop,rw "$IMG" "$MNT"
               fi
               
-              # FINAL CHECK: If mount is empty, FAIL IMMEDIATELY
+              # Verification
               USED_SPACE=$(sudo du -s "$MNT" | awk '{print $1}')
-              # 50000 blocks ~ 50MB. System should be > 500MB usually.
+              echo "Partition $PART usage: $USED_SPACE blocks"
               if [ "$USED_SPACE" -lt 50000 ]; then
-                 echo "::error::Partition $PART seems empty ($USED_SPACE blocks). Copy failed!"
+                 echo "::error::Partition $PART is empty! Copy failed."
                  exit 1
               fi
             fi
@@ -412,7 +423,7 @@ jobs:
         run: |
           set -e
           echo "::group::Building Images"
-          # Correct output directory
+          # Correct output directory (Local to build folder)
           OUT_DIR="output"
           mkdir -p $OUT_DIR
           sudo chmod 777 $OUT_DIR

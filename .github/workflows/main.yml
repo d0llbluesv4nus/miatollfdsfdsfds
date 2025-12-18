@@ -252,18 +252,15 @@ jobs:
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
                  # 4. ROBUST BATCH COPY
-                 # Fix: Use 'cp -t DEST' to handle arguments safely
-                 # Fix: Use 'xargs -r' to avoid running cp with empty file list
                  echo "Starting Copy..."
                  cd temp_mount_src
                  
-                 # A. Replicate Directory Structure
+                 # A. Replicate Directory Structure (Sudo needed)
                  echo "--> Replicating directories..."
                  sudo find . -type d -print0 | xargs -0 -r -I {} sudo mkdir -p "../$MNT/{}"
                  
-                 # B. Copy Files in Batches
+                 # B. Copy Files in Batches (Sudo needed)
                  echo "--> Copying files in batches..."
-                 # Using -t "../$MNT/" puts destination first, avoiding 'missing operand' errors
                  sudo find . -type f -o -type l -print0 | xargs -0 -r -n 50 sh -c 'sudo cp -aP --parents -t "../'"$MNT"'" "$@" && sync' _
                  
                  cd ..
@@ -304,7 +301,7 @@ jobs:
         run: |
           set -e
           echo "::group::Debloating"
-          # Operations happen directly on the mounted image
+          # Operations happen directly on the mounted image using SUDO
           APPS_TO_REMOVE="
           system/app/AnalyticsCore
           system/app/FacebookAppManager
@@ -319,10 +316,11 @@ jobs:
           "
           
           for APP in $APPS_TO_REMOVE; do
-            if [ -d "$APP" ]; then
-              echo "Removing $APP"
-              sudo rm -rf "$APP"
-            fi
+             # Check with sudo because of permissions
+             if sudo test -d "$APP"; then
+               echo "Removing $APP"
+               sudo rm -rf "$APP"
+             fi
           done
           echo "::endgroup::"
 
@@ -335,20 +333,22 @@ jobs:
           PORT="port_rom"
           DT="device/xiaomi/miatoll"
           
-          # 1. Install Overlays
+          # 1. Install Overlays (Sudo)
           sudo mkdir -p $PORT/product/overlay
           [ -d "$DT/overlay" ] && sudo cp -r "$DT/overlay/"* $PORT/product/overlay/
           
-          # 2. Patch build.prop
+          # 2. Patch build.prop (Sudo Find & Sed)
           echo "Patching props..."
-          find $PORT -name "build.prop" | while read prop; do
+          # Find files owned by root requires sudo
+          sudo find $PORT -name "build.prop" | while read prop; do
+            echo "Patching $prop"
             sudo sed -i 's/^ro.product.device=.*/ro.product.device=miatoll/' "$prop"
             sudo sed -i 's/^ro.product.board=.*/ro.product.board=sm6250/' "$prop"
             sudo sed -i 's/^ro.adb.secure=.*/ro.adb.secure=0/' "$prop"
           done
           
-          # 3. Audio Configs
-          if [ -d "$PORT/vendor/etc" ]; then
+          # 3. Audio Configs (Sudo)
+          if sudo test -d "$PORT/vendor/etc"; then
             [ -f "$DT/audio/audio_policy_configuration.xml" ] && sudo cp "$DT/audio/audio_policy_configuration.xml" "$PORT/vendor/etc/"
           fi
           
@@ -360,22 +360,36 @@ jobs:
           set -e
           echo "::group::Smali Patching"
           TOOLS="../tools"
-          JAR="$PWD/port_rom/system/framework/services.jar"
           
-          if [ -f "$JAR" ]; then
-            echo "Decompiling services.jar..."
-            java -jar $TOOLS/baksmali.jar d "$JAR" -o services_out
+          # Find services.jar recursively because path varies (system/framework or system/system/framework)
+          JAR_PATH=$(sudo find port_rom -name "services.jar" | grep "framework" | head -n 1)
+          
+          if [ ! -z "$JAR_PATH" ]; then
+            echo "Found services.jar at: $JAR_PATH"
             
-            # Simple patch example: Disable signature verification mock
+            # Copy OUT from root-owned mount to user temp file
+            sudo cp "$JAR_PATH" services.jar
+            sudo chmod 666 services.jar
+            
+            echo "Decompiling services.jar..."
+            java -jar $TOOLS/baksmali.jar d services.jar -o services_out
+            
+            # Simple patch example
             echo "Applying mocked patches..."
             
             echo "Recompiling..."
             java -jar $TOOLS/smali.jar a services_out -o classes.dex
-            # Updating the jar directly inside the mounted image
-            zip -u "$JAR" classes.dex
-            rm -rf services_out classes.dex
+            
+            # Update the jar (user owned copy)
+            zip -u services.jar classes.dex
+            
+            # Copy IN back to root-owned mount
+            sudo cp services.jar "$JAR_PATH"
+            
+            # Cleanup
+            rm -rf services_out classes.dex services.jar
           else
-            echo "services.jar not found."
+            echo "::warning::services.jar not found via find command."
           fi
           echo "::endgroup::"
 
@@ -386,6 +400,8 @@ jobs:
           echo "::group::Building Images"
           OUT_DIR="../output"
           mkdir -p $OUT_DIR
+          # Ensure output dir is writable by all or sudo used later
+          sudo chmod 777 $OUT_DIR
           
           finalize_image() {
             PART=$1
@@ -398,13 +414,13 @@ jobs:
                # 1. Unmount the RW image
                sudo umount "$MNT"
                
-               # 2. Shrink/Optimize (Optional, but good practice)
-               e2fsck -f -y "$IMG" || true
-               resize2fs -M "$IMG"
+               # 2. Shrink/Optimize
+               sudo e2fsck -f -y "$IMG" || true
+               sudo resize2fs -M "$IMG"
                
-               # 3. Convert back to Sparse for Flashing
+               # 3. Convert to sparse (Must use sudo to read root-owned raw image)
                echo "Converting to sparse..."
-               img2simg "$IMG" "$OUT_DIR/$PART.img"
+               sudo img2simg "$IMG" "$OUT_DIR/$PART.img"
             fi
           }
           
@@ -419,6 +435,11 @@ jobs:
         working-directory: ./build/output
         run: |
           set -e
+          # Fix ownership so current user can zip them
+          echo "Fixing permissions..."
+          sudo chown -R $USER:$USER .
+          ls -lh
+          
           if [ "${{ inputs.output_format }}" == "recovery_zip" ]; then
             echo "Zipping images..."
             zip -r miatoll_port.zip *.img

@@ -133,14 +133,13 @@ jobs:
           mkdir -p tools
           cd tools
           
-          # 1. Payload Dumper Go (Safe Extract)
+          # 1. Payload Dumper Go
           wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
           tar -zxf payload-dumper-go_1.2.2_linux_amd64.tar.gz
           find . -type f -name "payload-dumper-go" -exec chmod +x {} \;
           find . -type f -name "payload-dumper-go" -exec mv {} . \; || true
           
-          # 2. Compile simg2img / img2simg (Most robust method)
-          echo "Compiling simg2img/img2simg from source..."
+          # 2. Compile simg2img / img2simg
           git clone https://github.com/anestisb/android-simg2img
           cd android-simg2img
           make
@@ -211,7 +210,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Final Fix: Xargs Shift)
+      - name: '5. Prepare Images (Final Fix: Xargs Shift)'
         working-directory: ./build
         run: |
           set -e

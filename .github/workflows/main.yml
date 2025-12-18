@@ -114,7 +114,7 @@ jobs:
           # Install deps including zlib for compiling simg2img and erofs-utils
           sudo apt-get install -y \
             git wget curl python3 python3-pip zip unzip tar 7zip \
-            brotli lz4 openjdk-17-jdk rsync \
+            brotli lz4 openjdk-17-jdk \
             liblz4-tool e2fsprogs device-tree-compiler build-essential zlib1g-dev \
             erofs-utils
           
@@ -217,7 +217,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Convert EROFS -> EXT4 & Mount)
+      - name: 5. Prepare Images (Chunked Copy to prevent OOM)
         working-directory: ./build
         run: |
           set -e
@@ -239,8 +239,6 @@ jobs:
               echo "Filesystem: $FS_TYPE"
               
               if [[ "$FS_TYPE" == "EROFS" ]] || [[ "$FS_TYPE" == "Linux" ]]; then
-                 # Check specifically for EROFS using fsck.erofs if file command was vague "Linux" (sometimes happens)
-                 # But usually 'EROFS' is detected.
                  echo "EROFS detected. Converting to EXT4..."
                  
                  # 1. Create Target EXT4 Image (Size + 800MB buffer)
@@ -255,13 +253,23 @@ jobs:
                  # 3. Mount Target (EXT4) - RW
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. Copy Content (Using rsync for better memory management)
-                 echo "Copying files..."
-                 sudo rsync -aAX --info=progress2 temp_mount_src/ "$MNT/"
+                 # 4. CHUNKED COPY (To avoid OOM 137)
+                 echo "Copying files using chunked strategy..."
+                 cd temp_mount_src
+                 # Iterate over top-level items
+                 for ITEM in *; do
+                   if [ -e "$ITEM" ]; then
+                     echo "--> Copying $ITEM..."
+                     sudo cp -a "$ITEM" "../$MNT/"
+                     # Critical: Sync to flush RAM buffers to disk
+                     sync
+                   fi
+                 done
+                 cd ..
                  
                  # 5. Cleanup
                  sudo umount temp_mount_src
-                 sudo umount "$MNT" # Unmount to finalize writes
+                 sudo umount "$MNT"
                  
                  # 6. Replace original with EXT4
                  rm "$IMG"
@@ -273,12 +281,9 @@ jobs:
               else
                  # Assume EXT4
                  echo "EXT4 detected. Resizing..."
-                 # Expand
                  dd if=/dev/zero bs=1M count=512 >> "$IMG"
                  e2fsck -f -y "$IMG" || true
                  resize2fs "$IMG"
-                 
-                 # Mount RW
                  sudo mount -o loop,rw "$IMG" "$MNT"
               fi
             fi

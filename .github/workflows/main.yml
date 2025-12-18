@@ -96,7 +96,7 @@ jobs:
             exit 1
           fi
           
-          # Setup Swap (12GB) - Critical for stability
+          # Setup Swap (12GB) - Critical
           sudo swapoff -a
           sudo rm -f /swapfile
           sudo fallocate -l 12G /swapfile
@@ -137,7 +137,6 @@ jobs:
           echo "Installing Payload Dumper..."
           wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
           tar -zxf payload-dumper-go_1.2.2_linux_amd64.tar.gz
-          # Robust find to locate binary
           find . -type f -name "payload-dumper-go" -exec chmod +x {} \;
           find . -type f -name "payload-dumper-go" -exec mv {} . \; || true
           
@@ -180,7 +179,6 @@ jobs:
           if grep -q "payload.bin" content.txt; then
             echo "Format: Payload.bin"
             unzip firmware.zip payload.bin
-            # Call payload-dumper-go
             PD_TOOL="../../tools/payload-dumper-go"
             if [ ! -f "$PD_TOOL" ]; then
               PD_TOOL=$(find ../../tools -name payload-dumper-go -type f | head -n 1)
@@ -217,7 +215,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Granular Recursive Copy)
+      - name: 5. Prepare Images (Tar Stream Copy)
         working-directory: ./build
         run: |
           set -e
@@ -225,35 +223,6 @@ jobs:
           
           mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
           mkdir -p temp_mount_src
-          
-          # Function to copy safely without OOM
-          granular_copy() {
-            SRC_DIR=$1
-            DEST_DIR=$2
-            
-            # Create destination folder
-            sudo mkdir -p "$DEST_DIR"
-            
-            # Iterate through contents
-            for ITEM in "$SRC_DIR"/*; do
-              [ -e "$ITEM" ] || continue
-              BASENAME=$(basename "$ITEM")
-              
-              # Identify folders that contain thousands of files and need recursion
-              # This prevents rsync/cp from building a massive file list in RAM
-              if [ -d "$ITEM" ] && [[ "$BASENAME" =~ ^(system|product|vendor|app|priv-app|framework|lib|lib64|bin|etc)$ ]]; then
-                  echo "--> Deep diving into $BASENAME..."
-                  granular_copy "$ITEM" "$DEST_DIR/$BASENAME"
-              else
-                  # For individual files or small folders, copy directly
-                  # Using cp -a is safer than rsync here to avoid generator overhead
-                  sudo cp -a "$ITEM" "$DEST_DIR/"
-                  
-                  # CRITICAL: Flush RAM buffers to disk immediately
-                  sudo sync
-              fi
-            done
-          }
           
           process_partition() {
             PART=$1
@@ -280,9 +249,14 @@ jobs:
                  # 3. Mount Target (EXT4)
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. GRANULAR COPY (No OOM)
-                 echo "Starting Granular Copy..."
-                 granular_copy "temp_mount_src" "$MNT"
+                 # 4. STREAM COPY (TAR PIPE)
+                 # This is OOM-proof because it doesn't build file lists in RAM.
+                 # --xattrs preserves SELinux contexts.
+                 echo "Starting Stream Copy (Tar)..."
+                 cd temp_mount_src
+                 sudo sh -c "tar --xattrs -cf - . | tar --xattrs -xf - -C ../$MNT"
+                 sudo sync
+                 cd ..
                  
                  # 5. Cleanup
                  sudo umount temp_mount_src

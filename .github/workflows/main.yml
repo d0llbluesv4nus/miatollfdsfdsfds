@@ -96,7 +96,7 @@ jobs:
             exit 1
           fi
           
-          # Setup Swap (12GB)
+          # Setup Swap (12GB) - Still needed for Java/Smali
           sudo swapoff -a
           sudo rm -f /swapfile
           sudo fallocate -l 12G /swapfile
@@ -179,10 +179,9 @@ jobs:
           if grep -q "payload.bin" content.txt; then
             echo "Format: Payload.bin"
             unzip firmware.zip payload.bin
-            # Call payload-dumper-go (it might be in root or a subdir, usually root now)
+            # Call payload-dumper-go
             PD_TOOL="../../tools/payload-dumper-go"
             if [ ! -f "$PD_TOOL" ]; then
-              # Fallback search
               PD_TOOL=$(find ../../tools -name payload-dumper-go -type f | head -n 1)
             fi
             "$PD_TOOL" -o raw_images -p system,system_ext,product,vendor,odm payload.bin
@@ -213,55 +212,56 @@ jobs:
         run: |
           set -e
           echo "Cloning Miatoll Source..."
-          
-          # Using verified active repos to avoid 404/auth errors
-          echo "Cloning Device Tree..."
           git clone "${{ inputs.device_tree_url }}" device/xiaomi/miatoll
-          
-          echo "Cloning Vendor Tree..."
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
-          
-          echo "Cloning Kernel Tree..."
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Mount & Prepare Filesystem
+      - name: 5. Prepare Images (Resize & Mount RW)
         working-directory: ./build
         run: |
           set -e
-          echo "Mounting Images..."
-          mkdir -p mnt/system mnt/system_ext mnt/product mnt/vendor
+          echo "::group::Preparing In-Place Editing"
+          # STRATEGY: Instead of copying (cp -a) which causes OOM 137,
+          # we expand the raw images and mount them Read/Write.
+          
           mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
           
-          mount_and_copy() {
+          prepare_partition() {
             PART=$1
             IMG="input/raw_images/$PART.img"
-            MNT="mnt/$PART"
-            DEST="port_rom/$PART"
+            MNT="port_rom/$PART"
             
             if [ -f "$IMG" ]; then
-              # Try mounting ext4
-              if sudo mount -o loop,ro "$IMG" "$MNT"; then
-                echo "Mounted $PART"
-                sudo cp -a "$MNT/." "$DEST/"
-                sudo umount "$MNT"
-              else
-                echo "Mount failed for $PART (possibly EROFS), trying 7z extract..."
-                7z x "$IMG" -o"$DEST" || true
-              fi
+              echo "Processing $PART..."
+              
+              # 1. Expand image size by 512MB to allow adding files/patching
+              dd if=/dev/zero bs=1M count=512 >> "$IMG"
+              
+              # 2. Check and Resize filesystem
+              echo "Resizing FS..."
+              e2fsck -f -y "$IMG" || true # Force check, ignore non-critical
+              resize2fs "$IMG"
+              
+              # 3. Mount RW
+              echo "Mounting RW to $MNT..."
+              sudo mount -o loop,rw "$IMG" "$MNT"
             fi
           }
           
-          mount_and_copy system
-          mount_and_copy system_ext
-          mount_and_copy product
-          mount_and_copy vendor
+          prepare_partition system
+          prepare_partition system_ext
+          prepare_partition product
+          prepare_partition vendor
+          
+          echo "Images mounted RW. Ready for direct editing."
+          echo "::endgroup::"
 
       - name: 6. Debloat System
         working-directory: ./build/port_rom
         run: |
           set -e
           echo "::group::Debloating"
-          # List of heavy/unnecessary apps
+          # Operations happen directly on the mounted image now
           APPS_TO_REMOVE="
           system/app/AnalyticsCore
           system/app/FacebookAppManager
@@ -324,11 +324,11 @@ jobs:
             java -jar $TOOLS/baksmali.jar d "$JAR" -o services_out
             
             # Simple patch example: Disable signature verification mock
-            # Real world: Apply .diff patches or sed on smali files
             echo "Applying mocked patches..."
             
             echo "Recompiling..."
             java -jar $TOOLS/smali.jar a services_out -o classes.dex
+            # Updating the jar directly inside the mounted image
             zip -u "$JAR" classes.dex
             rm -rf services_out classes.dex
           else
@@ -344,36 +344,31 @@ jobs:
           OUT_DIR="../output"
           mkdir -p $OUT_DIR
           
-          repack_image() {
-            NAME=$1
-            SRC="port_rom/$NAME"
-            if [ -d "$SRC" ]; then
-              # Calculate size + 150MB buffer
-              SIZE=$(du -sb "$SRC" | cut -f1)
-              SIZE=$(($SIZE + 157286400))
-              
-              echo "Repacking $NAME.img ($SIZE bytes)..."
-              # Create empty file
-              dd if=/dev/zero of="$NAME.img" bs=1 count=0 seek=$SIZE
-              # Format ext4
-              mkfs.ext4 -L $NAME "$NAME.img"
-              # Copy files
-              mkdir -p tmp_mnt
-              sudo mount -o loop "$NAME.img" tmp_mnt
-              sudo cp -a "$SRC/." tmp_mnt/
-              sudo umount tmp_mnt
-              rm -rf tmp_mnt
-              
-              # Convert to sparse
-              img2simg "$NAME.img" "$OUT_DIR/$NAME.img"
-              rm "$NAME.img"
+          finalize_image() {
+            PART=$1
+            MNT="port_rom/$PART"
+            IMG="input/raw_images/$PART.img"
+            
+            if [ -d "$MNT" ] && [ -f "$IMG" ]; then
+               echo "Finalizing $PART..."
+               
+               # 1. Unmount the RW image
+               sudo umount "$MNT"
+               
+               # 2. Shrink/Optimize (Optional, but good practice)
+               e2fsck -f -y "$IMG" || true
+               resize2fs -M "$IMG"
+               
+               # 3. Convert back to Sparse for Flashing
+               echo "Converting to sparse..."
+               img2simg "$IMG" "$OUT_DIR/$PART.img"
             fi
           }
           
-          repack_image system
-          repack_image system_ext
-          repack_image product
-          repack_image vendor
+          finalize_image system
+          finalize_image system_ext
+          finalize_image product
+          finalize_image vendor
           
           echo "::endgroup::"
 

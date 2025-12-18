@@ -210,11 +210,14 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: '5. Prepare Images (Final Fix: Xargs Shift)'
+      - name: '5. Prepare Images (Final Fix: Path Navigation)'
         working-directory: ./build
         run: |
           set -e
           echo "::group::Preparing Images"
+          
+          # Save Build Directory Path
+          BUILD_DIR=$(pwd)
           
           mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
           mkdir -p temp_mount_src
@@ -222,9 +225,9 @@ jobs:
           process_partition() {
             PART=$1
             # Using absolute paths
-            IMG="$(pwd)/input/raw_images/$PART.img"
-            MNT="$(pwd)/port_rom/$PART"
-            SRC_MNT="$(pwd)/temp_mount_src"
+            IMG="$BUILD_DIR/input/raw_images/$PART.img"
+            MNT="$BUILD_DIR/port_rom/$PART"
+            SRC_MNT="$BUILD_DIR/temp_mount_src"
             
             if [ -f "$IMG" ]; then
               echo "Processing $PART..."
@@ -246,20 +249,21 @@ jobs:
                  sudo mount -o loop,ro "$IMG" "$SRC_MNT"
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. ROBUST BATCH COPY (FIXED LOGIC)
+                 # 4. ROBUST BATCH COPY
                  echo "Starting Batch Copy..."
                  cd "$SRC_MNT"
                  
                  # A. Replicate Directories first
                  echo "--> Directories..."
-                 sudo find . -type d -print0 | sudo xargs -0 -I {} mkdir -p "$MNT/{}"
+                 sudo find . -type d -print0 | sudo xargs -0 -r -I {} mkdir -p "$MNT/{}"
                  
                  # B. Files in Batches of 256
-                 # FIX: Using 'shift' to correctly separate target arg from file list
                  echo "--> Files..."
-                 sudo find . -type f -o -type l -print0 | sudo xargs -0 -n 256 -P 1 sh -c 'TARGET="$1"; shift; cp -a --parents -t "$TARGET" "$@" && sync' -- "$MNT"
+                 # Uses shift to handle target directory argument correctly
+                 sudo find . -type f -o -type l -print0 | sudo xargs -0 -r -n 256 -P 1 sh -c 'TARGET="$1"; shift; cp -a --parents -t "$TARGET" "$@" && sync' -- "$MNT"
                  
-                 cd ../..
+                 # FIX: Return to BUILD_DIR explicitly
+                 cd "$BUILD_DIR"
                  
                  # 5. Cleanup
                  sudo umount "$SRC_MNT"

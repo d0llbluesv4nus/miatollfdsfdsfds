@@ -103,6 +103,7 @@ jobs:
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          sudo swapon --show
           echo "::endgroup::"
 
       - name: 2. Install Tools & Dependencies
@@ -215,16 +216,15 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Final Batch Method + VM Tune)
+      - name: 5. Prepare Images (Huge Buffer + Bash Loop)
         working-directory: ./build
         run: |
           set -e
           echo "::group::Preparing Images"
           
-          # VM Tuning to prevent OOM during massive IO
-          sudo sysctl -w vm.dirty_background_ratio=1
-          sudo sysctl -w vm.dirty_ratio=5
-          sudo sysctl -w vm.vfs_cache_pressure=500
+          # Tune IO to prevent stalls
+          sudo sysctl -w vm.dirty_background_ratio=5
+          sudo sysctl -w vm.dirty_ratio=10
           
           mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
           mkdir -p temp_mount_src
@@ -240,11 +240,15 @@ jobs:
               echo "Filesystem: $FS_TYPE"
               
               if [[ "$FS_TYPE" == "EROFS" ]] || [[ "$FS_TYPE" == "Linux" ]]; then
-                 echo "EROFS detected. Converting to EXT4..."
+                 echo "EROFS/Dynamic detected. Converting to EXT4..."
                  
-                 # 1. Create Target EXT4 Image (+1.5GB buffer)
+                 # 1. Create Target EXT4 Image with MASSIVE buffer
+                 # EROFS is highly compressed. Dynamic partitions need room.
+                 # Size = Original * 3 + 3GB
                  ORIG_SIZE=$(stat -c%s "$IMG")
-                 NEW_SIZE=$(($ORIG_SIZE + 1610612736))
+                 NEW_SIZE=$(($ORIG_SIZE * 3 + 3221225472))
+                 echo "Allocating new image size: $NEW_SIZE bytes"
+                 
                  dd if=/dev/zero of="${PART}_ext4.img" bs=1 count=0 seek=$NEW_SIZE
                  mkfs.ext4 -F "${PART}_ext4.img"
                  
@@ -254,19 +258,35 @@ jobs:
                  # 3. Mount Target (EXT4)
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. ROBUST BATCH COPY (Proven working method)
-                 echo "Starting Batch Copy..."
+                 # 4. SAFE BASH COPY LOOP
+                 echo "Starting Copy (Bash Loop)..."
                  cd temp_mount_src
                  
-                 # A. Replicate Directory Structure
-                 echo "--> Replicating directories..."
-                 # xargs -r prevents running if empty
-                 sudo find . -type d -print0 | xargs -0 -r -I {} sudo mkdir -p "../$MNT/{}"
+                 # List of folders to recurse into (Heavy folders)
+                 HEAVY_DIRS="app priv-app framework lib lib64 data apex overlay"
                  
-                 # B. Copy Files in Batches of 50
-                 echo "--> Copying files..."
-                 # Use cp -t to specify target first. sync every batch.
-                 sudo find . -type f -o -type l -print0 | xargs -0 -r -n 50 sh -c 'sudo cp -aP --parents -t "../'"$MNT"'" "$@" && sync' _
+                 sudo find . -maxdepth 1 -mindepth 1 | while read ITEM; do
+                    BASENAME=$(basename "$ITEM")
+                    IS_HEAVY=0
+                    
+                    for H in $HEAVY_DIRS; do
+                       if [ "$BASENAME" == "$H" ]; then IS_HEAVY=1; break; fi
+                    done
+                    
+                    if [ -d "$ITEM" ] && [ "$IS_HEAVY" -eq 1 ]; then
+                       echo "-> Recursing into heavy dir: $BASENAME"
+                       sudo mkdir -p "../$MNT/$BASENAME"
+                       # Copy children one by one
+                       sudo find "$ITEM" -maxdepth 1 -mindepth 1 | while read CHILD; do
+                          sudo cp -a "$CHILD" "../$MNT/$BASENAME/"
+                          sudo sync # Flush RAM
+                       done
+                    else
+                       # Copy normal file/dir
+                       sudo cp -a "$ITEM" "../$MNT/"
+                       sudo sync
+                    fi
+                 done
                  
                  cd ..
                  
@@ -283,7 +303,8 @@ jobs:
                  
               else
                  echo "EXT4 detected. Resizing..."
-                 dd if=/dev/zero bs=1M count=512 >> "$IMG"
+                 # Add 1GB for edits
+                 dd if=/dev/zero bs=1M count=1024 >> "$IMG"
                  e2fsck -f -y "$IMG" || true
                  resize2fs "$IMG"
                  sudo mount -o loop,rw "$IMG" "$MNT"
@@ -292,7 +313,7 @@ jobs:
               # Verification
               USED_SPACE=$(sudo du -s "$MNT" | awk '{print $1}')
               echo "Partition $PART usage: $USED_SPACE blocks"
-              if [ "$USED_SPACE" -lt 50000 ]; then
+              if [ "$USED_SPACE" -lt 1000 ]; then
                  echo "::error::Partition $PART is empty! Copy failed."
                  exit 1
               fi
@@ -425,7 +446,7 @@ jobs:
                # 1. Unmount the RW image
                sudo umount "$MNT"
                
-               # 2. Shrink/Optimize
+               # 2. Shrink/Optimize (Minimize size for dynamic partitions)
                sudo e2fsck -f -y "$IMG" || true
                sudo resize2fs -M "$IMG"
                

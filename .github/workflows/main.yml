@@ -26,17 +26,17 @@ on:
       device_tree_url:
         description: 'Device Tree URL'
         required: true
-        default: 'https://github.com/PixelExperience-Devices/device_xiaomi_miatoll'
+        default: 'https://github.com/LineageOS/android_device_xiaomi_miatoll'
         type: string
       vendor_tree_url:
         description: 'Vendor Tree URL'
         required: true
-        default: 'https://github.com/PixelExperience-Devices/vendor_xiaomi_miatoll'
+        default: 'https://github.com/clarencelol/vendor_xiaomi_miatoll'
         type: string
       kernel_tree_url:
         description: 'Kernel Tree URL'
         required: true
-        default: 'https://github.com/PixelExperience-Devices/kernel_xiaomi_miatoll'
+        default: 'https://github.com/LineageOS/android_kernel_xiaomi_sm6250'
         type: string
       target_variant:
         description: 'Target Region'
@@ -213,8 +213,15 @@ jobs:
         run: |
           set -e
           echo "Cloning Miatoll Source..."
+          
+          # Using verified active repos to avoid 404/auth errors
+          echo "Cloning Device Tree..."
           git clone "${{ inputs.device_tree_url }}" device/xiaomi/miatoll
+          
+          echo "Cloning Vendor Tree..."
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
+          
+          echo "Cloning Kernel Tree..."
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
       - name: 5. Mount & Prepare Filesystem

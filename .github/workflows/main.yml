@@ -361,7 +361,7 @@ jobs:
           echo "::group::Smali Patching"
           TOOLS="../tools"
           
-          # Find services.jar recursively because path varies (system/framework or system/system/framework)
+          # Find services.jar recursively via sudo
           JAR_PATH=$(sudo find port_rom -name "services.jar" | grep "framework" | head -n 1)
           
           if [ ! -z "$JAR_PATH" ]; then
@@ -398,9 +398,10 @@ jobs:
         run: |
           set -e
           echo "::group::Building Images"
-          OUT_DIR="../output"
+          # FIX: Use correct local folder for output to match Step 10
+          OUT_DIR="output"
           mkdir -p $OUT_DIR
-          # Ensure output dir is writable by all or sudo used later
+          # Ensure output dir is writable 
           sudo chmod 777 $OUT_DIR
           
           finalize_image() {
@@ -418,7 +419,7 @@ jobs:
                sudo e2fsck -f -y "$IMG" || true
                sudo resize2fs -M "$IMG"
                
-               # 3. Convert to sparse (Must use sudo to read root-owned raw image)
+               # 3. Convert to sparse (Must use sudo)
                echo "Converting to sparse..."
                sudo img2simg "$IMG" "$OUT_DIR/$PART.img"
             fi

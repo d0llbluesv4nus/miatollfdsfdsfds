@@ -71,7 +71,7 @@ jobs:
           echo "::group::Cleaning Disk Space"
           df -h
           
-          # Remove massive pre-installed packages to free space
+          # Remove massive pre-installed packages
           sudo rm -rf /opt/hostedtoolcache
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
@@ -210,7 +210,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Final Xargs Batch Method)
+      - name: 5. Prepare Images (Final Xargs with Sudo)
         working-directory: ./build
         run: |
           set -e
@@ -221,7 +221,7 @@ jobs:
           
           process_partition() {
             PART=$1
-            # Use Absolute Paths to avoid any confusion in xargs/cp
+            # Using absolute paths to prevent any ambiguity with sudo/subshells
             IMG="$(pwd)/input/raw_images/$PART.img"
             MNT="$(pwd)/port_rom/$PART"
             SRC_MNT="$(pwd)/temp_mount_src"
@@ -233,7 +233,7 @@ jobs:
               if [[ "$FS_TYPE" == "EROFS" ]] || [[ "$FS_TYPE" == "Linux" ]]; then
                  echo "EROFS detected. Converting to EXT4..."
                  
-                 # 1. Create Target EXT4 Image (Original Size * 4 for Dynamic Partition safety)
+                 # 1. Create Target EXT4 Image (Original Size * 4 for Dynamic Partition expansion)
                  ORIG_SIZE=$(stat -c%s "$IMG")
                  NEW_SIZE=$(($ORIG_SIZE * 4)) 
                  # Ensure at least 3GB buffer
@@ -247,19 +247,18 @@ jobs:
                  sudo mount -o loop,ro "$IMG" "$SRC_MNT"
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. ROBUST BATCH COPY (XARGS)
-                 # This avoids OOM (no python loop overhead) and handles paths correctly
+                 # 4. ROBUST BATCH COPY (SUDO XARGS FIX)
                  echo "Starting Batch Copy..."
                  cd "$SRC_MNT"
                  
-                 # A. Replicate Directories first
+                 # A. Replicate Directories first (sudo xargs ensures root permissions)
                  echo "--> Directories..."
-                 sudo find . -type d -exec mkdir -p "$MNT/{}" \;
+                 sudo find . -type d -print0 | sudo xargs -0 -I {} mkdir -p "$MNT/{}"
                  
-                 # B. Files in Batches of 256
-                 # We pass MNT as argument $1 to sh -c to handle path safely
+                 # B. Files in Batches of 256 (sudo xargs to run cp as root)
+                 # $1 inside sh -c receives the value of $MNT
                  echo "--> Files..."
-                 sudo find . -type f -o -type l -print0 | xargs -0 -n 256 -P 1 sh -c 'cp -a --parents -t "$1" "$@" && sync' _ "$MNT"
+                 sudo find . -type f -o -type l -print0 | sudo xargs -0 -n 256 -P 1 sh -c 'cp -a --parents -t "$1" "$@" && sync' _ "$MNT"
                  
                  cd ../..
                  

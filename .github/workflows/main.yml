@@ -96,10 +96,11 @@ jobs:
             exit 1
           fi
           
-          # Setup Swap (12GB) - Critical
+          # Setup Swap (12GB) - Using DD for stability
           sudo swapoff -a
           sudo rm -f /swapfile
-          sudo fallocate -l 12G /swapfile
+          # DD is safer than fallocate for swap stability
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=12288 status=progress
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -215,7 +216,7 @@ jobs:
           git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
           git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
 
-      - name: 5. Prepare Images (Tar Stream Copy)
+      - name: 5. Prepare Images (Smart Chunked Copy)
         working-directory: ./build
         run: |
           set -e
@@ -223,6 +224,48 @@ jobs:
           
           mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
           mkdir -p temp_mount_src
+          
+          # Function to copy safely without OOM
+          # Iterates heavy folders item-by-item
+          smart_copy() {
+            SRC=$1
+            DST=$2
+            
+            # Heavy folders list
+            HEAVY="app priv-app framework lib lib64 apex data system overlay"
+            
+            echo "Smart Copying from $SRC to $DST"
+            
+            # Loop through source root
+            sudo find "$SRC" -maxdepth 1 -mindepth 1 | while read ITEM; do
+                BASENAME=$(basename "$ITEM")
+                
+                IS_HEAVY=0
+                for H in $HEAVY; do
+                    if [[ "$BASENAME" == "$H" ]]; then
+                        IS_HEAVY=1
+                        break
+                    fi
+                done
+                
+                if [ -d "$ITEM" ] && [ "$IS_HEAVY" -eq 1 ]; then
+                    echo "--> Detailed copy for heavy folder: $BASENAME"
+                    sudo mkdir -p "$DST/$BASENAME"
+                    
+                    # Loop children of heavy folder
+                    sudo find "$ITEM" -maxdepth 1 -mindepth 1 | while read CHILD; do
+                        sudo cp -a "$CHILD" "$DST/$BASENAME/"
+                        # Sync after every child of heavy folder
+                        sudo sync
+                    done
+                else
+                    # Copy normal files/folders directly
+                    sudo cp -a "$ITEM" "$DST/"
+                    # Sync after every top-level item
+                    sudo sync
+                fi
+            done
+          }
           
           process_partition() {
             PART=$1
@@ -249,14 +292,8 @@ jobs:
                  # 3. Mount Target (EXT4)
                  sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
                  
-                 # 4. STREAM COPY (TAR PIPE)
-                 # This is OOM-proof because it doesn't build file lists in RAM.
-                 # --xattrs preserves SELinux contexts.
-                 echo "Starting Stream Copy (Tar)..."
-                 cd temp_mount_src
-                 sudo sh -c "tar --xattrs -cf - . | tar --xattrs -xf - -C ../$MNT"
-                 sudo sync
-                 cd ..
+                 # 4. SMART COPY
+                 smart_copy "temp_mount_src" "$MNT"
                  
                  # 5. Cleanup
                  sudo umount temp_mount_src

@@ -111,7 +111,7 @@ jobs:
           echo "::group::Installing Packages"
           sudo apt-get update
           
-          # Removed failing packages (simg2img, img2simg, etc) from apt
+          # Standard tools (removed missing packages simg2img/img2simg)
           sudo apt-get install -y \
             git wget curl python3 python3-pip zip unzip tar 7zip \
             brotli lz4 openjdk-17-jdk \
@@ -126,17 +126,23 @@ jobs:
           chmod a+x ~/bin/repo
           export PATH=~/bin:$PATH
           
-          # MANUAL INSTALL OF BINARIES (Fixes 'package not found' error)
+          # MANUAL INSTALL OF BINARIES
           echo "Downloading Android Image Tools manually..."
           
-          # Payload Dumper
           mkdir -p tools
           cd tools
+          
+          # Payload Dumper Go (Fixed extraction)
+          echo "Installing Payload Dumper..."
           wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
           tar -zxf payload-dumper-go_1.2.2_linux_amd64.tar.gz
-          mv payload-dumper-go_1.2.2_linux_amd64/payload-dumper-go .
+          # Find the binary wherever it was extracted and ensure it's executable
+          find . -name "payload-dumper-go" -type f -exec chmod +x {} \;
+          # Move to current dir if nested (failsafe)
+          find . -mindepth 2 -name "payload-dumper-go" -type f -exec mv {} . \; || true
           
-          # simg2img / img2simg (From ErfanGSI Tools - Trusted Source)
+          # simg2img / img2simg (From ErfanGSI Tools)
+          echo "Installing simg2img/img2simg..."
           wget -q https://raw.githubusercontent.com/erfanoabdi/android_tools/master/linux/bin/simg2img -O simg2img
           wget -q https://raw.githubusercontent.com/erfanoabdi/android_tools/master/linux/bin/img2simg -O img2simg
           chmod +x simg2img img2simg
@@ -174,7 +180,13 @@ jobs:
           if grep -q "payload.bin" content.txt; then
             echo "Format: Payload.bin"
             unzip firmware.zip payload.bin
-            ../../tools/payload-dumper-go -o raw_images -p system,system_ext,product,vendor,odm payload.bin
+            # Call payload-dumper-go (it might be in root or a subdir, usually root now)
+            PD_TOOL="../../tools/payload-dumper-go"
+            if [ ! -f "$PD_TOOL" ]; then
+              # Fallback search if mv failed strangely
+              PD_TOOL=$(find ../../tools -name payload-dumper-go -type f | head -n 1)
+            fi
+            "$PD_TOOL" -o raw_images -p system,system_ext,product,vendor,odm payload.bin
           elif grep -q "super.img" content.txt; then
             echo "Format: Super.img"
             unzip firmware.zip super.img

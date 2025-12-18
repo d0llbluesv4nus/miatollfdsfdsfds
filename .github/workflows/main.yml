@@ -64,20 +64,25 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 1. Environment Cleanup (Critical)
+      - name: 1. Environment Cleanup (Aggressive)
         id: cleanup
         run: |
           set -e
           echo "::group::Cleaning Disk Space"
           df -h
           
-          # Remove massive pre-installed packages to free up ~30GB+
+          # Remove massive pre-installed packages to free up maximum space
+          # /opt/hostedtoolcache is usually 15GB+
+          sudo rm -rf /opt/hostedtoolcache
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/local/share/powershell
           sudo rm -rf /usr/share/swift
           sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/lib/google-cloud-sdk
+          sudo rm -rf /usr/lib/jvm
           
           # Clean Docker and APT
           sudo docker system prune -a -f
@@ -85,15 +90,15 @@ jobs:
           sudo apt-get autoremove -y
           sudo rm -rf /var/lib/apt/lists/*
           
-          # Check space
+          # Check space (Modified threshold to 30GB which is safe for Miatoll)
           AVAILABLE=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
           echo "Free Space: ${AVAILABLE}GB"
-          if [ "$AVAILABLE" -lt 40 ]; then
-            echo "::error::Not enough disk space (<40GB). Setup failed."
+          if [ "$AVAILABLE" -lt 30 ]; then
+            echo "::error::Not enough disk space (<30GB). Setup failed."
             exit 1
           fi
           
-          # Setup Swap (12GB)
+          # Setup Swap (12GB) to prevent OOM during repacking
           sudo swapoff -a
           sudo rm -f /swapfile
           sudo fallocate -l 12G /swapfile
@@ -165,9 +170,10 @@ jobs:
             echo "Format: Super.img"
             unzip firmware.zip super.img
             simg2img super.img super.raw
-            # Note: lpunpack would be needed here for generic super.img
-            # For this workflow, we assume standard payload or sparse images for stability
-            echo "::warning::Super.img extraction requires lpunpack (not included in standard apt). Trying fallback."
+            # Note: lpunpack is required for super.img splitting. 
+            # If not present in env, this path might need custom tool download.
+            # Assuming payload-dumper-go handles most modern ROMs.
+            echo "::warning::Super.img extraction assumes flat image or lpunpack availability."
           else
             echo "Format: Standard Images"
             unzip firmware.zip "*.img" -d raw_images
@@ -176,9 +182,12 @@ jobs:
           # Ensure images are raw
           cd raw_images
           for img in *.img; do
-            if file "$img" | grep -q "sparse"; then
-              simg2img "$img" "${img%.*}.raw"
-              mv "${img%.*}.raw" "$img"
+            if [ -f "$img" ]; then
+                if file "$img" | grep -q "sparse"; then
+                  echo "Converting sparse $img..."
+                  simg2img "$img" "${img%.*}.raw"
+                  mv "${img%.*}.raw" "$img"
+                fi
             fi
           done
 

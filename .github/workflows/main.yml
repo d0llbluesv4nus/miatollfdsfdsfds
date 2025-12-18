@@ -111,11 +111,11 @@ jobs:
           echo "::group::Installing Packages"
           sudo apt-get update
           
-          # Standard tools (removed missing packages simg2img/img2simg)
+          # Install deps including zlib for compiling simg2img
           sudo apt-get install -y \
             git wget curl python3 python3-pip zip unzip tar 7zip \
             brotli lz4 openjdk-17-jdk \
-            liblz4-tool e2fsprogs device-tree-compiler
+            liblz4-tool e2fsprogs device-tree-compiler build-essential zlib1g-dev
           
           # Install Python protobuf
           pip3 install --upgrade pip protobuf
@@ -127,37 +127,36 @@ jobs:
           export PATH=~/bin:$PATH
           
           # MANUAL INSTALL OF BINARIES
-          echo "Downloading Android Image Tools manually..."
+          echo "Setting up Android Image Tools..."
           
           mkdir -p tools
           cd tools
           
-          # Payload Dumper Go (Fixed extraction)
+          # 1. Payload Dumper Go (Safe Extract)
           echo "Installing Payload Dumper..."
           wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
           tar -zxf payload-dumper-go_1.2.2_linux_amd64.tar.gz
-          # Find the binary wherever it was extracted and ensure it's executable
-          find . -name "payload-dumper-go" -type f -exec chmod +x {} \;
-          # Move to current dir if nested (failsafe)
-          find . -mindepth 2 -name "payload-dumper-go" -type f -exec mv {} . \; || true
+          # Robust find to locate binary
+          find . -type f -name "payload-dumper-go" -exec chmod +x {} \;
+          find . -type f -name "payload-dumper-go" -exec mv {} . \; || true
           
-          # simg2img / img2simg (From ErfanGSI Tools)
-          echo "Installing simg2img/img2simg..."
-          wget -q https://raw.githubusercontent.com/erfanoabdi/android_tools/master/linux/bin/simg2img -O simg2img
-          wget -q https://raw.githubusercontent.com/erfanoabdi/android_tools/master/linux/bin/img2simg -O img2simg
-          chmod +x simg2img img2simg
-          
-          # Move binaries to path
+          # 2. Compile simg2img / img2simg (Most robust method)
+          echo "Compiling simg2img/img2simg from source..."
+          git clone https://github.com/anestisb/android-simg2img
+          cd android-simg2img
+          make
           sudo cp simg2img /usr/local/bin/
           sudo cp img2simg /usr/local/bin/
+          cd ..
+          rm -rf android-simg2img
           
-          # Apktool
+          # 3. Apktool
           wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.1.jar -O apktool.jar
           echo '#!/bin/bash' > apktool
           echo 'java -jar $(dirname $0)/apktool.jar "$@"' >> apktool
           chmod +x apktool
           
-          # Baksmali/Smali
+          # 4. Baksmali/Smali
           wget -q https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar -O baksmali.jar
           wget -q https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar -O smali.jar
           echo "::endgroup::"
@@ -183,7 +182,7 @@ jobs:
             # Call payload-dumper-go (it might be in root or a subdir, usually root now)
             PD_TOOL="../../tools/payload-dumper-go"
             if [ ! -f "$PD_TOOL" ]; then
-              # Fallback search if mv failed strangely
+              # Fallback search
               PD_TOOL=$(find ../../tools -name payload-dumper-go -type f | head -n 1)
             fi
             "$PD_TOOL" -o raw_images -p system,system_ext,product,vendor,odm payload.bin

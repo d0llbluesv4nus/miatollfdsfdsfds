@@ -1,437 +1,187 @@
-name: Miatoll Auto-Porter (SM6250)
+name: Miatoll HyperOS 3 Auto-Porter
 
 on:
   workflow_dispatch:
     inputs:
       source_url:
-        description: 'Direct URL to Source ROM (Fastboot/Recovery Zip/Payload)'
+        description: 'HyperOS / MIUI firmware zip'
         required: true
         type: string
-      rom_type:
-        description: 'Source ROM Type'
-        required: true
-        type: choice
-        options:
-          - AOSP
-          - MIUI
-          - OneUI
-          - OxygenOS
-          - ColorOS
-          - Other
       android_version:
-        description: 'Android Version'
+        description: 'Android Version (14/15)'
         required: true
-        default: '13'
+        default: '14'
         type: string
-      device_tree_url:
-        description: 'Device Tree URL'
-        required: true
-        default: 'https://github.com/LineageOS/android_device_xiaomi_miatoll'
-        type: string
-      vendor_tree_url:
-        description: 'Vendor Tree URL'
-        required: true
-        default: 'https://github.com/clarencelol/vendor_xiaomi_miatoll'
-        type: string
-      kernel_tree_url:
-        description: 'Kernel Tree URL'
-        required: true
-        default: 'https://github.com/LineageOS/android_kernel_xiaomi_sm6250'
-        type: string
-      target_variant:
-        description: 'Target Region'
-        required: true
-        type: choice
-        options:
-          - global
-          - india
-          - china
       output_format:
         description: 'Output Format'
         required: true
         type: choice
-        options:
-          - recovery_zip
-          - super_img
+        options: [recovery_zip, raw_images]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 1. Environment Cleanup (Aggressive)
-        id: cleanup
+      - name: Prepare environment
         run: |
           set -e
-          echo "::group::Cleaning Disk Space"
-          df -h
-          
-          # Remove massive pre-installed packages
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/lib/node_modules
-          sudo rm -rf /usr/lib/google-cloud-sdk
-          sudo rm -rf /usr/lib/jvm
-          
-          # Clean Docker and APT
-          sudo docker system prune -a -f
-          sudo apt-get clean
-          sudo apt-get autoremove -y
-          sudo rm -rf /var/lib/apt/lists/*
-          
-          # Check space (Threshold 30GB)
-          AVAILABLE=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-          echo "Free Space: ${AVAILABLE}GB"
-          if [ "$AVAILABLE" -lt 30 ]; then
-            echo "::error::Not enough disk space (<30GB). Setup failed."
-            exit 1
-          fi
-          
-          # Setup Swap (12GB) - Using DD for stability
-          sudo swapoff -a
-          sudo rm -f /swapfile
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=12288 status=progress
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "::endgroup::"
-
-      - name: 2. Install Tools & Dependencies
-        run: |
-          set -e
-          echo "::group::Installing Packages"
           sudo apt-get update
-          
-          # Install deps including zlib for compiling simg2img and erofs-utils
           sudo apt-get install -y \
-            git wget curl python3 python3-pip zip unzip tar 7zip \
-            brotli lz4 openjdk-17-jdk \
-            liblz4-tool e2fsprogs device-tree-compiler build-essential zlib1g-dev \
-            erofs-utils
-          
-          # Install Python protobuf
+            git wget curl unzip zip p7zip-full \
+            python3 python3-pip \
+            openjdk-17-jdk \
+            e2fsprogs erofs-utils \
+            liblz4-tool brotli \
+            build-essential zlib1g-dev
+
           pip3 install --upgrade pip protobuf
-          
-          # Setup Repo tool
-          mkdir -p ~/bin
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          export PATH=~/bin:$PATH
-          
-          # MANUAL INSTALL OF BINARIES
-          echo "Setting up Android Image Tools..."
-          
+
+      - name: Setup tools
+        run: |
           mkdir -p tools
           cd tools
-          
-          # 1. Payload Dumper Go
+
           wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
-          tar -zxf payload-dumper-go_1.2.2_linux_amd64.tar.gz
-          find . -type f -name "payload-dumper-go" -exec chmod +x {} \;
-          find . -type f -name "payload-dumper-go" -exec mv {} . \; || true
-          
-          # 2. Compile simg2img / img2simg
+          tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
+          chmod +x payload-dumper-go
+
           git clone https://github.com/anestisb/android-simg2img
           cd android-simg2img
           make
-          sudo cp simg2img /usr/local/bin/
-          sudo cp img2simg /usr/local/bin/
+          sudo cp simg2img img2simg /usr/local/bin/
           cd ..
-          rm -rf android-simg2img
-          
-          # 3. Apktool
-          wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.1.jar -O apktool.jar
-          echo '#!/bin/bash' > apktool
-          echo 'java -jar $(dirname $0)/apktool.jar "$@"' >> apktool
-          chmod +x apktool
-          
-          # 4. Baksmali/Smali
-          wget -q https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar -O baksmali.jar
-          wget -q https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar -O smali.jar
-          echo "::endgroup::"
 
-      - name: 3. Download & Extract Firmware
-        working-directory: ./
+      - name: Download HyperOS firmware
         run: |
-          set -e
-          mkdir -p build/input
-          mkdir -p build/output
+          mkdir -p build/input build/output
           cd build/input
-          
-          echo "Downloading Firmware..."
-          wget "${{ inputs.source_url }}" -O firmware.zip
-          
-          echo "Extracting..."
-          7z l firmware.zip > content.txt
-          mkdir -p raw_images
-          
-          if grep -q "payload.bin" content.txt; then
-            echo "Format: Payload.bin"
-            unzip firmware.zip payload.bin
-            PD_TOOL="../../tools/payload-dumper-go"
-            [ ! -f "$PD_TOOL" ] && PD_TOOL=$(find ../../tools -name payload-dumper-go -type f | head -n 1)
-            "$PD_TOOL" -o raw_images -p system,system_ext,product,vendor,odm payload.bin
-          elif grep -q "super.img" content.txt; then
-            echo "Format: Super.img"
-            unzip firmware.zip super.img
-            simg2img super.img super.raw
-            echo "::warning::Super.img extraction assumes flat image."
-          else
-            echo "Format: Standard Images"
-            unzip firmware.zip "*.img" -d raw_images
-          fi
-          
-          # Ensure images are raw
+          wget "${{ inputs.source_url }}" -O rom.zip
+          7z l rom.zip > list.txt
+          mkdir raw_images
+
+          unzip rom.zip payload.bin
+          ../../tools/payload-dumper-go -o raw_images \
+            -p system,system_ext,product,vendor,odm payload.bin
+
           cd raw_images
-          for img in *.img; do
-            if [ -f "$img" ]; then
-                if file "$img" | grep -q "sparse"; then
-                  simg2img "$img" "${img%.*}.raw"
-                  mv "${img%.*}.raw" "$img"
-                fi
-            fi
+          for i in *.img; do
+            file "$i" | grep -qi sparse && simg2img "$i" tmp && mv tmp "$i"
           done
 
-      - name: 4. Download Device Trees
-        working-directory: ./build
+      - name: Mount partitions
+        working-directory: build
         run: |
           set -e
-          echo "Cloning Miatoll Source..."
-          git clone "${{ inputs.device_tree_url }}" device/xiaomi/miatoll
-          git clone "${{ inputs.vendor_tree_url }}" vendor/xiaomi/miatoll
-          git clone "${{ inputs.kernel_tree_url }}" kernel/xiaomi/miatoll
+          mkdir -p port/{system,system_ext,product,vendor,odm,src}
 
-      - name: '5. Prepare Images (Final Fix: Path Navigation)'
-        working-directory: ./build
-        run: |
-          set -e
-          echo "::group::Preparing Images"
-          
-          # Save Build Directory Path
-          BUILD_DIR=$(pwd)
-          
-          mkdir -p port_rom/system port_rom/system_ext port_rom/product port_rom/vendor
-          mkdir -p temp_mount_src
-          
-          process_partition() {
-            PART=$1
-            # Using absolute paths
-            IMG="$BUILD_DIR/input/raw_images/$PART.img"
-            MNT="$BUILD_DIR/port_rom/$PART"
-            SRC_MNT="$BUILD_DIR/temp_mount_src"
-            
-            if [ -f "$IMG" ]; then
-              echo "Processing $PART..."
-              FS_TYPE=$(file -bL "$IMG" | awk '{print $1}')
-              
-              if [[ "$FS_TYPE" == "EROFS" ]] || [[ "$FS_TYPE" == "Linux" ]]; then
-                 echo "EROFS detected. Converting to EXT4..."
-                 
-                 # 1. Create Target EXT4 Image (Original Size * 4 for Dynamic Partition expansion)
-                 ORIG_SIZE=$(stat -c%s "$IMG")
-                 NEW_SIZE=$(($ORIG_SIZE * 4)) 
-                 # Ensure at least 3GB buffer
-                 [ "$NEW_SIZE" -lt 3221225472 ] && NEW_SIZE=3221225472
-                 
-                 dd if=/dev/zero of="${PART}_ext4.img" bs=1 count=0 seek=$NEW_SIZE
-                 mkfs.ext4 -F "${PART}_ext4.img"
-                 
-                 # 2. Mount
-                 sudo mount -o loop,ro "$IMG" "$SRC_MNT"
-                 sudo mount -o loop,rw "${PART}_ext4.img" "$MNT"
-                 
-                 # 4. ROBUST BATCH COPY
-                 echo "Starting Batch Copy..."
-                 cd "$SRC_MNT"
-                 
-                 # A. Replicate Directories first
-                 echo "--> Directories..."
-                 sudo find . -type d -print0 | sudo xargs -0 -r -I {} mkdir -p "$MNT/{}"
-                 
-                 # B. Files in Batches of 256
-                 echo "--> Files..."
-                 # Uses shift to handle target directory argument correctly
-                 sudo find . -type f -o -type l -print0 | sudo xargs -0 -r -n 256 -P 1 sh -c 'TARGET="$1"; shift; cp -a --parents -t "$TARGET" "$@" && sync' -- "$MNT"
-                 
-                 # FIX: Return to BUILD_DIR explicitly
-                 cd "$BUILD_DIR"
-                 
-                 # 5. Cleanup
-                 sudo umount "$SRC_MNT"
-                 sudo umount "$MNT"
-                 
-                 # 6. Swap
-                 rm "$IMG"
-                 mv "${PART}_ext4.img" "$IMG"
-                 
-                 # 7. Remount
-                 sudo mount -o loop,rw "$IMG" "$MNT"
-                 
-              else
-                 echo "EXT4 detected. Resizing..."
-                 dd if=/dev/zero bs=1M count=2048 >> "$IMG"
-                 e2fsck -f -y "$IMG" || true
-                 resize2fs "$IMG"
-                 sudo mount -o loop,rw "$IMG" "$MNT"
-              fi
-              
-              # Verification
-              USED_SPACE=$(sudo du -s "$MNT" | awk '{print $1}')
-              echo "Partition $PART usage: $USED_SPACE blocks"
-              if [ "$USED_SPACE" -lt 1000 ]; then
-                 echo "::error::Partition $PART is empty! Copy failed."
-                 exit 1
-              fi
+          mount_img() {
+            P=$1
+            IMG=input/raw_images/$P.img
+            MNT=port/$P
+            SRC=port/src
+
+            FS=$(file -bL "$IMG")
+            if echo "$FS" | grep -qi erofs; then
+              SIZE=$(stat -c%s "$IMG")
+              dd if=/dev/zero of=$P.ext4 bs=1 count=0 seek=$((SIZE*4))
+              mkfs.ext4 -F -L $P -I 256 $P.ext4
+              sudo mount -o loop,ro "$IMG" "$SRC"
+              sudo mount -o loop,rw "$P.ext4" "$MNT"
+              cd "$SRC"
+              sudo find . \( -type f -o -type l -o -type d \) -print0 | \
+                sudo xargs -0 -r cp -a --parents -t "$MNT"
+              cd -
+              sudo umount "$SRC"
+              sudo umount "$MNT"
+              mv $P.ext4 "$IMG"
             fi
+            sudo mount -o loop,rw "$IMG" "$MNT"
           }
-          
-          process_partition system
-          process_partition system_ext
-          process_partition product
-          process_partition vendor
-          
-          rm -rf temp_mount_src
-          
-          echo "Images mounted RW."
-          echo "::endgroup::"
 
-      - name: 6. Debloat System
-        working-directory: ./build/port_rom
-        run: |
-          set -e
-          echo "::group::Debloating"
-          # Operations happen directly on the mounted image using SUDO
-          APPS_TO_REMOVE="
-          system/app/AnalyticsCore
-          system/app/FacebookAppManager
-          system/app/FacebookServices
-          system/priv-app/AmazonShopping
-          system/priv-app/NetflixStub
-          product/app/YouTube
-          product/app/YouTubeMusic
-          product/app/Duo
-          product/app/Gmail2
-          system_ext/app/CarrierServices
-          "
-          
-          for APP in $APPS_TO_REMOVE; do
-             if sudo test -d "$APP"; then
-               echo "Removing $APP"
-               sudo rm -rf "$APP"
-             fi
+          for p in system system_ext product vendor odm; do
+            mount_img $p
           done
-          echo "::endgroup::"
 
-      - name: 7. Apply Miatoll Adaptations
-        working-directory: ./build
+      - name: VNDK compatibility hacks (HyperOS)
+        working-directory: build
         run: |
           set -e
-          echo "::group::Adapting for Miatoll"
-          
-          PORT="port_rom"
-          DT="device/xiaomi/miatoll"
-          
-          # 1. Install Overlays (Sudo)
-          sudo mkdir -p $PORT/product/overlay
-          [ -d "$DT/overlay" ] && sudo cp -r "$DT/overlay/"* $PORT/product/overlay/
-          
-          # 2. Patch build.prop (Sudo Find & Sed)
-          echo "Patching props..."
-          sudo find $PORT -name "build.prop" | while read prop; do
-            echo "Patching $prop"
-            sudo sed -i 's/^ro.product.device=.*/ro.product.device=miatoll/' "$prop"
-            sudo sed -i 's/^ro.product.board=.*/ro.product.board=sm6250/' "$prop"
-            sudo sed -i 's/^ro.adb.secure=.*/ro.adb.secure=0/' "$prop"
-          done
-          
-          # 3. Audio Configs (Sudo)
-          if sudo test -d "$PORT/vendor/etc"; then
-            [ -f "$DT/audio/audio_policy_configuration.xml" ] && sudo cp "$DT/audio/audio_policy_configuration.xml" "$PORT/vendor/etc/"
-          fi
-          
-          echo "::endgroup::"
+          VENDOR=port/vendor
 
-      - name: 8. Smali Patching (Services.jar)
-        working-directory: ./build
+          # Detect VNDK
+          VNDK_VER=$(grep -R "ro.vndk.version" $VENDOR/build.prop | cut -d= -f2 | head -n1)
+          [ -z "$VNDK_VER" ] && VNDK_VER=33
+
+          mkdir -p port/system_ext/lib64/vndk-sp-$VNDK_VER
+          ln -sf /vendor/lib64/libc.so port/system_ext/lib64/vndk-sp-$VNDK_VER/libc.so
+
+          # Disable strict checks
+          sed -i 's/ro.vndk.lite=true/ro.vndk.lite=false/' \
+            port/vendor/build.prop || true
+
+      - name: Vendor blobs alignment (MIUI / HyperOS)
+        working-directory: build
         run: |
           set -e
-          echo "::group::Smali Patching"
-          TOOLS="../tools"
-          
-          # Find services.jar recursively via sudo
-          JAR_PATH=$(sudo find port_rom -name "services.jar" | grep "framework" | head -n 1)
-          
-          if [ ! -z "$JAR_PATH" ]; then
-            echo "Found services.jar at: $JAR_PATH"
-            sudo cp "$JAR_PATH" services.jar
-            sudo chmod 666 services.jar
-            java -jar $TOOLS/baksmali.jar d services.jar -o services_out
-            java -jar $TOOLS/smali.jar a services_out -o classes.dex
-            zip -u services.jar classes.dex
-            sudo cp services.jar "$JAR_PATH"
-            rm -rf services_out classes.dex services.jar
-          fi
-          echo "::endgroup::"
+          V=port/vendor
 
-      - name: 9. Build Final Images
-        working-directory: ./build
-        run: |
-          set -e
-          echo "::group::Building Images"
-          # Output dir local to build folder
-          OUT_DIR="output"
-          mkdir -p $OUT_DIR
-          sudo chmod 777 $OUT_DIR
-          
-          finalize_image() {
-            PART=$1
-            MNT="port_rom/$PART"
-            IMG="input/raw_images/$PART.img"
-            
-            if [ -d "$MNT" ] && [ -f "$IMG" ]; then
-               echo "Finalizing $PART..."
-               sudo umount "$MNT"
-               # Shrink to minimum size
-               sudo e2fsck -f -y "$IMG" || true
-               sudo resize2fs -M "$IMG"
-               # Convert to sparse
-               echo "Converting to sparse..."
-               sudo img2simg "$IMG" "$OUT_DIR/$PART.img"
+          # Common MIUI blobs expected by AOSP
+          for lib in libwfdservice.so libqti-perfd-client.so libimsmedia.so; do
+            if [ -f "$V/lib64/$lib" ]; then
+              ln -sf /vendor/lib64/$lib port/system_ext/lib64/$lib
             fi
-          }
-          
-          finalize_image system
-          finalize_image system_ext
-          finalize_image product
-          finalize_image vendor
-          
-          echo "::endgroup::"
+          done
 
-      - name: 10. Create Output Artifact
-        working-directory: ./build/output
+          # Move MIUI-only libs out of system path
+          find port/system -name "*miui*" -type f -exec mv {} $V/lib64/ \; || true
+
+      - name: SEPolicy fixups (HyperOS)
+        working-directory: build
         run: |
           set -e
-          echo "Fixing permissions..."
-          sudo chown -R $USER:$USER .
-          ls -lh
-          
-          if [ "${{ inputs.output_format }}" == "recovery_zip" ]; then
-            echo "Zipping images..."
-            zip -r miatoll_port.zip *.img
+          VENDOR=port/vendor
+
+          # Permissive vendor domains
+          for dom in miui_daemon ims ril thermal hal_audio_default; do
+            echo "(permissive $dom)" >> $VENDOR/etc/selinux/vendor_sepolicy.cil
+          done
+
+          # Allow common vendor HALs
+          cat >> $VENDOR/etc/selinux/vendor_sepolicy.cil <<EOF
+          (allow hal_audio_default vendor_file (file (read write open)))
+          (allow ims vendor_socket (sock_file (write)))
+          EOF
+
+      - name: Finalize images
+        working-directory: build
+        run: |
+          set -e
+          OUT=output
+          mkdir -p $OUT
+
+          for p in system system_ext product vendor odm; do
+            IMG=input/raw_images/$p.img
+            MNT=port/$p
+            sudo umount "$MNT" || true
+            sudo e2fsck -f -y "$IMG" || true
+            sudo resize2fs -M "$IMG"
+            img2simg "$IMG" "$OUT/$p.img"
+          done
+
+      - name: Package
+        working-directory: build/output
+        run: |
+          if [ "${{ inputs.output_format }}" = "recovery_zip" ]; then
+            zip -r miatoll_hyperos3_port.zip *.img
             rm *.img
           fi
 
-      - name: 11. Upload Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: Miatoll_Port_${{ inputs.rom_type }}_${{ inputs.android_version }}
+          name: miatoll_hyperos3_port
           path: build/output/*
